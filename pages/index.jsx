@@ -21,8 +21,8 @@ const RECOMMENDATION_SCHEMA = {
     propertyOrdering: ["analyzed_skills", "recommendations"]
 };
 
-// --- MOCK RESUME CONTENT (Used when a file is selected, as we cannot read the actual file in this environment) ---
-const MOCK_RESUME_CONTENT = "Python, SQL, MongoDB, Database Management, CRUD application logic, Teamwork, Communication, Computer Science Engineering degree.";
+// --- MOCK RESUME CONTENT (Updated for DevOps/Infrastructure Testing) ---
+const MOCK_RESUME_CONTENT = "Terraform, Kubernetes, AWS, Jenkins CI/CD, Linux Administration, Python scripting, Network Security, Configuration Management.";
 
 const App = () => {
     // --- Recommendation State ---
@@ -315,9 +315,9 @@ ${combinedInput.join('\n---')}
                         disabled={isLoading}
                     >
                         {isLoading ? (
-                            <div className="flex items-center justify-center">
+                            <div className="flex items-center justify-center text-white">
                                 <Loader2 className="animate-spin w-5 h-5 mr-2" />
-                                Analyzing...
+                                <span className="animate-pulse">Analyzing Skills...</span>
                             </div>
                         ) : (
                             'Predict My Career Path'
