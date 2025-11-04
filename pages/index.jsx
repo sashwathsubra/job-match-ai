@@ -1,17 +1,28 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Upload, XCircle, Zap, Loader2, CheckCircle, Shield, MessageCircle, Send, Globe } from 'lucide-react';
 
-// Mock data for recommendations spanning Intern to Senior Architect levels
-const MOCK_RECOMMENDATIONS = [
-    "1. Software Development Intern (Python/Database)",
-    "2. Junior Backend Developer (SQL/MongoDB)",
-    "3. Mid-Level Python Software Engineer",
-    "4. Data Engineer (Database & ETL Focus)",
-    "5. Senior Backend Engineer (Distributed Systems)",
-    "6. Database Architect (MongoDB/SQL Optimization)"
-];
+// --- JSON Schema for Structured Career Recommendation Output ---
+const RECOMMENDATION_SCHEMA = {
+    type: "OBJECT",
+    properties: {
+        analyzed_skills: {
+            type: "STRING",
+            description: "A single, concise string summarizing all the core technical skills analyzed from the input."
+        },
+        recommendations: {
+            type: "ARRAY",
+            description: "An array of 4 to 6 career path roles, ordered from most immediate (Intern/Junior) to most aspirational (Senior/Architect), based on the provided skills.",
+            items: {
+                type: "STRING",
+                description: "The recommended job role and one or two key technologies, e.g., '1. Junior Backend Developer (SQL/MongoDB)'"
+            }
+        }
+    },
+    propertyOrdering: ["analyzed_skills", "recommendations"]
+};
 
-const MOCK_SKILLS_FROM_RESUME = "Python, SQL, MongoDB, Database Management, CRUD application logic, Teamwork, Communication.";
+// --- MOCK RESUME CONTENT (Used when a file is selected, as we cannot read the actual file in this environment) ---
+const MOCK_RESUME_CONTENT = "Python, SQL, MongoDB, Database Management, CRUD application logic, Teamwork, Communication, Computer Science Engineering degree.";
 
 const App = () => {
     // --- Recommendation State ---
@@ -40,7 +51,7 @@ const App = () => {
     const API_KEY = ""; // Canvas will inject key
     const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
     
-    // --- Gemini Chat Function ---
+    // --- Gemini Chat Function (Unchanged) ---
     const sendMessageToGemini = useCallback(async (message) => {
         if (!message.trim()) return;
 
@@ -51,56 +62,69 @@ const App = () => {
 
         const systemInstruction = "You are a helpful career guidance chatbot embedded in a Job Match AI application. You assist users with questions about their resume analysis, job roles, and career development. Be concise and use Google Search for up-to-date, real-time information.";
 
-        try {
-            const payload = {
-                contents: newChatHistory.map(msg => ({ role: msg.role, parts: [{ text: msg.text }] })),
-                tools: [{ "google_search": {} }],
-                systemInstruction: { parts: [{ text: systemInstruction }] },
-            };
+        // Use exponential backoff for retries
+        const maxRetries = 3;
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                const payload = {
+                    contents: newChatHistory.map(msg => ({ role: msg.role, parts: [{ text: msg.text }] })),
+                    tools: [{ "google_search": {} }],
+                    systemInstruction: { parts: [{ text: systemInstruction }] },
+                };
 
-            const response = await fetch(API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
 
-            if (!response.ok) {
-                throw new Error(`API returned status ${response.status}`);
-            }
+                if (response.status === 429 && attempt < maxRetries - 1) {
+                    await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+                    continue; // Retry
+                }
 
-            const result = await response.json();
-            const candidate = result.candidates?.[0];
-            let responseText = "Sorry, I couldn't get a clear response.";
-            let sources = [];
+                if (!response.ok) {
+                    throw new Error(`API returned status ${response.status}`);
+                }
 
-            if (candidate && candidate.content?.parts?.[0]?.text) {
-                responseText = candidate.content.parts[0].text;
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+                let responseText = "Sorry, I couldn't get a clear response.";
+                let sources = [];
+
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    responseText = candidate.content.parts[0].text;
+                    
+                    // Extract grounding sources
+                    const groundingMetadata = candidate.groundingMetadata;
+                    if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                        sources = groundingMetadata.groundingAttributions
+                            .map(attribution => ({
+                                uri: attribution.web?.uri,
+                                title: attribution.web?.title,
+                            }))
+                            .filter(source => source.uri && source.title);
+                    }
+                }
                 
-                // Extract grounding sources
-                const groundingMetadata = candidate.groundingMetadata;
-                if (groundingMetadata && groundingMetadata.groundingAttributions) {
-                    sources = groundingMetadata.groundingAttributions
-                        .map(attribution => ({
-                            uri: attribution.web?.uri,
-                            title: attribution.web?.title,
-                        }))
-                        .filter(source => source.uri && source.title);
+                // Format response text with sources
+                let fullResponse = responseText;
+                if (sources.length > 0) {
+                    fullResponse += '\n\n**Sources:**\n' + sources.map((s, i) => `[${i + 1}] ${s.title} (${new URL(s.uri).hostname})`).join('\n');
+                }
+
+                setChatHistory(prev => [...prev, { role: 'model', text: fullResponse, sources: sources }]);
+                setIsChatLoading(false);
+                return; // Success, exit function
+
+            } catch (error) {
+                if (attempt === maxRetries - 1) {
+                    console.error('Gemini API Error after retries:', error);
+                    setChatHistory(prev => [...prev, { role: 'model', text: 'Sorry, I hit an error connecting to the intelligence engine after multiple retries. Please check the console for details.' }]);
+                    setIsChatLoading(false);
+                    return;
                 }
             }
-            
-            // Format response text with sources
-            let fullResponse = responseText;
-            if (sources.length > 0) {
-                fullResponse += '\n\n**Sources:**\n' + sources.map((s, i) => `[${i + 1}] ${s.title} (${new URL(s.uri).hostname})`).join('\n');
-            }
-
-            setChatHistory(prev => [...prev, { role: 'model', text: fullResponse, sources: sources }]);
-
-        } catch (error) {
-            console.error('Gemini API Error:', error);
-            setChatHistory(prev => [...prev, { role: 'model', text: 'Sorry, I hit an error connecting to the intelligence engine. Please try again.' }]);
-        } finally {
-            setIsChatLoading(false);
         }
     }, [chatHistory, API_URL]);
 
@@ -109,18 +133,7 @@ const App = () => {
         sendMessageToGemini(chatInput);
     };
 
-    // --- Recommendation Logic (Remains unchanged) ---
-    const handleFileChange = useCallback((e) => {
-        const file = e.target.files[0];
-        setResumeFile(file || null);
-    }, []);
-
-    const handleRemoveFile = useCallback(() => {
-        setResumeFile(null);
-        const inputElement = document.getElementById('resume_file');
-        if (inputElement) { inputElement.value = ''; }
-    }, []);
-
+    // --- Recommendation Logic (Updated to use Gemini Structured Output) ---
     const handleSubmit = useCallback(async (e) => {
         e.preventDefault();
         setError(null);
@@ -135,24 +148,84 @@ const App = () => {
         setIsLoading(true);
 
         try {
-            // --- MOCK API CALL & RESPONSE SIMULATION ---
-            await new Promise(resolve => setTimeout(resolve, 2000)); 
+            let combinedInput = [];
 
-            let combinedSkills = MOCK_SKILLS_FROM_RESUME;
+            // 1. Handle Text Input
             if (skillsText.trim()) {
-                combinedSkills = `[From Textbox: ${skillsText.trim()}] + [From Resume: ${MOCK_SKILLS_FROM_RESUME}]`;
+                combinedInput.push(`[Manual Skills Input]: ${skillsText.trim()}`);
+            }
+
+            // 2. Simulate File Content Reading (using mock content)
+            if (resumeFile) {
+                // NOTE: In a production app, you would use a FileReader here to get the Base64 content of the PDF.
+                // For this environment, we use a fixed mock string to represent the resume text for the AI.
+                combinedInput.push(`[Resume File Content]: ${MOCK_RESUME_CONTENT}`);
             }
             
-            setRecommendations(MOCK_RECOMMENDATIONS);
-            setSkillsUsed(combinedSkills);
+            const fullPrompt = `Analyze the user's combined skills and experience provided below, and generate a structured career path recommendation. The path must contain between 4 and 6 roles, starting from the most immediate entry-level position (e.g., Intern/Junior) up to a senior or architect-level position, providing key focus areas for each role.
+
+Skills and Experience to Analyze:
+---
+${combinedInput.join('\n---')}
+---
+`;
+
+            const systemInstruction = "You are a specialized career path AI. Your sole task is to analyze user skills and generate a structured JSON object containing a concise summary of the analyzed skills and a progressive array of 4 to 6 job recommendations. DO NOT include any introductory or explanatory text outside the JSON object.";
+            
+            const payload = {
+                contents: [{ parts: [{ text: fullPrompt }] }],
+                systemInstruction: { parts: [{ text: systemInstruction }] },
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: RECOMMENDATION_SCHEMA,
+                }
+            };
+            
+            const response = await fetch(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                throw new Error(`API returned status ${response.status}`);
+            }
+
+            const result = await response.json();
+            const responseText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+            if (!responseText) {
+                throw new Error("Received empty response from the AI engine.");
+            }
+
+            const parsedJson = JSON.parse(responseText);
+
+            if (parsedJson.recommendations && parsedJson.analyzed_skills) {
+                setRecommendations(parsedJson.recommendations);
+                setSkillsUsed(parsedJson.analyzed_skills);
+            } else {
+                throw new Error("AI response was not in the expected structured format. Check AI output in console.");
+            }
 
         } catch (err) {
-            console.error('Processing error:', err);
-            setError('An error occurred during the simulated analysis. Check console for details.');
+            console.error('AI Processing Error:', err);
+            setError(`Failed to get recommendations. Details: ${err.message}. Please check the console for the full error.`);
         } finally {
             setIsLoading(false);
         }
-    }, [skillsText, resumeFile]);
+    }, [skillsText, resumeFile, API_URL]);
+
+    const handleFileChange = useCallback((e) => {
+        const file = e.target.files[0];
+        setResumeFile(file || null);
+    }, []);
+
+    const handleRemoveFile = useCallback(() => {
+        setResumeFile(null);
+        const inputElement = document.getElementById('resume_file');
+        if (inputElement) { inputElement.value = ''; }
+    }, []);
+
 
     const fileName = useMemo(() => resumeFile ? resumeFile.name : 'No file selected.', [resumeFile]);
     const fileCtaText = useMemo(() => resumeFile ? 'File Selected' : 'Click to Select File', [resumeFile]);
@@ -268,8 +341,8 @@ const App = () => {
                         <ul className="space-y-3">
                             {recommendations.map((role, index) => (
                                 <li key={index} className="p-4 rounded-xl text-gray-900 font-semibold shadow-md flex items-center transition duration-200 hover:bg-indigo-50 bg-blue-50">
-                                    <span className="w-7 h-7 flex items-center justify-center bg-indigo-500 text-white rounded-full mr-3 text-sm font-extrabold">{role.split('.')[0]}</span>
-                                    <span>{role.substring(role.indexOf('.') + 2)}</span>
+                                    <span className="w-7 h-7 flex items-center justify-center bg-indigo-500 text-white rounded-full mr-3 text-sm font-extrabold">{index + 1}</span>
+                                    <span>{role}</span>
                                 </li>
                             ))}
                         </ul>
